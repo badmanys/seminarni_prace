@@ -1,0 +1,277 @@
+#----IMPORTY----
+import customtkinter as ctk # pip install customtkinter
+from datetime import datetime # pro časová razítka, pip install datetime
+import threading # pro spouštění volání AI na pozadí
+import google.generativeai as genai # pro Gemini API, pip install google-generative-ai
+from googleapiclient.discovery import build # pro Google Custom Search API, pip install google-api-python-client
+import requests # pro stahování PDF souborů, pip install requests
+from bs4 import BeautifulSoup # pro parsování HTML, pip install beautifulsoup4
+from playwright.sync_api import sync_playwright # pro načítání webových stránek, pip install playwright
+from PIL import Image, ImageTk # pro načítání a zobrazení loga, pip install pillow
+import io # pro práci s PDF v paměti, pip install io
+import pypdf # pro čtení PDF souborů, pip install pypdf
+
+#----KONSTANTY----
+GEMINI_API_KEY = "x"
+CESTA_SKOLNIHO_RADU = "x" 
+GOOGLE_SEARCH_API_KEY = "x"
+SEARCH_ENGINE_ID = "d38ae3efdf3f54707"
+
+genai.configure(api_key=GEMINI_API_KEY) # Konfigurace Gemini API klíče, nastavené ve webu
+
+#----FUNKCE (NÁSTROJE PRO AI)----
+def prohledej_web_skoly(dotaz: str) -> str:
+    """
+    Prohledá web gjsb.cz a vrátí text nalezené stránky.
+    Používá se pro všechny dotazy týkající se školy (učitelé, akce).
+    """
+    try:
+        service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY) # Vytvoření služby pro Google Custom Search API
+        result = service.cse().list(q=dotaz, cx=SEARCH_ENGINE_ID, num=1).execute() # Provedení vyhledávacího dotazu s omezením na 1 výsledek
+        items = result.get('items', []) # Získání výsledků vyhledávání a zapsaní do proměnné items
+        if not items or 'link' not in items[0]: #kontrola, zda byly nalezeny nějaké výsledky
+            return "Na webu školy jsem nenašel žádnou relevantní stránku."
+        
+        page_url = items[0]['link'] # Získání URL první nalezené stránky
+
+        with sync_playwright() as p: # Použití Playwright pro načtení stránky
+            browser = p.chromium.launch() # Spuštění prohlížeče Chromium
+            page = browser.new_page() # Otevření nové stránky
+            page.goto(page_url, wait_until='domcontentloaded', timeout=8000) # Navigace na URL stránky s čekáním na načtení DOM
+            page_content = page.content() # Získání HTML obsahu stránky
+            browser.close() # Zavření prohlížeče
+
+        soup = BeautifulSoup(page_content, 'html.parser') # Parsování HTML pomocí BeautifulSoup
+        for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside']): # Odstranění nepotřebných elementů
+            element.decompose() # Odstranění elementu z DOM
+        return soup.get_text(separator=' ', strip=True) # Vrácení čistého textu stránky
+    except Exception as e:  # Chyba při prohledávání webu
+        print(f"CHYBA PŘI PROHLEDÁVÁNÍ WEBU ŠKOLY: {e}")
+        return f"Při prohledávání webu školy došlo k chybě: {e}"
+
+def nacti_skolni_rad() -> str: #funkce pro načtení školního řádu z PDF -> vrací textový obsah
+    
+    text_z_pdf = "" 
+    with open(CESTA_SKOLNIHO_RADU, "rb") as f: #otevření PDF souboru ve čtecím binárním režimu
+        reader = pypdf.PdfReader(f) #vytvoření čtečky PDF pomocí pypdf
+            
+        for page in reader.pages: #procházení každé stránky v PDF
+            text_z_pdf += page.extract_text() + "\n" #extrahování textu ze stránky a přidání do proměnné text_z_pdf s novým řádkem
+    return text_z_pdf #vrácení celkového textového obsahu PDF
+
+def ziskej_obsah_pdf_z_webu(dotaz: str) -> str: 
+    """
+    Najde na webu gjsb.cz relevantní PDF soubor, stáhne ho a vrátí jeho textový obsah.
+    Používá se pro dotazy na formuláře a další dokumenty.
+    """
+    try:
+        service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY) # Vytvoření služby pro Google Custom Search API
+        result = service.cse().list(q=f"{dotaz} filetype:pdf", cx=SEARCH_ENGINE_ID, num=1).execute() # Provedení vyhledávacího dotazu s omezením na PDF 1 výsledek
+        
+        items = result.get('items', []) # Získání výsledků vyhledávání a zapsaní do proměnné items
+        if not items or 'link' not in items[0]: #kontrola, zda byly nalezeny nějaké výsledky
+            return "Nepodařilo se mi najít žádný relevantní PDF soubor."
+
+        pdf_url = items[0]['link'] # Získání URL první nalezeného PDF souboru
+        
+        if not pdf_url.lower().endswith('.pdf'): # Kontrola, zda URL vede na PDF soubor
+            return f"Nalezený odkaz ({pdf_url}) nevede na PDF soubor. Zkuste prosím obecnější nástroj."
+
+        response = requests.get(pdf_url, timeout=10)  # Stažení PDF souboru
+        response.raise_for_status() # Kontrola úspěšnosti stažení
+
+        pdf_file = io.BytesIO(response.content) # Načtení PDF do paměti
+        reader = pypdf.PdfReader(pdf_file) # Vytvoření čtečky PDF pomocí pypdf
+        
+        text_z_pdf = ""
+        for page in reader.pages: # Procházení každé stránky v PDF
+            text_z_pdf += page.extract_text() + "\n" # Extrahování textu ze stránky a přidání do proměnné text_z_pdf s novým řádkem
+        
+        if not text_z_pdf.strip():
+            return "PDF soubor se podařilo stáhnout, ale neobsahuje žádný text, který bych mohl přečíst (může jít o obrázek)."
+
+        return text_z_pdf # Vrácení textového obsahu PDF
+
+    except Exception as e:
+        print(f"CHYBA PŘI ZPRACOVÁNÍ PDF: {e}")
+        return f"Při získávání PDF souboru došlo k chybě: {e}"
+
+#----DEFINICE MODELU A PROMPTU----
+BOT_PROMPT = (
+    "Jsi asistent pro studenty Gymnázia Jindřicha Šimona Baara v Domažlicích. "
+    "Tvým úkolem je odpovídat na otázky pomocí nástrojů."
+
+    "**PRAVIDLO PRO NÁSTROJE: Zeptej se na svolení POUZE JEDNOU ZA CELOU KONVERZACI.**\n\n"
+
+    "**DOSTUPNÉ NÁSTROJE:**\n"
+    "1. `prohledej_web_skoly`: Použij pro obecné dotazy, aktuální informace, suplování, akce, seznamy učitelů atd.\n"
+    "2. `ziskej_obsah_pdf_z_webu`: Použij pro hledání online formulářů a specifických PDF dokumentů na webu (NE pro školní řád).\n"
+    "3. `nacti_skolni_rad`: Použij VŽDY, když se dotaz týká pravidel, řádu školy, povinností, práv, klasifikace, omlouvání absencí atd.\n\n"
+
+    "**TVŮJ PRACOVNÍ POSTUP:**\n"
+    "1. Analyzuj otázku uživatele.\n"
+    "2. Rozhodni se, který nástroj bys chtěl použít.\n"
+    "3. **Podívej se do historie chatu. Pokud jsi se UŽ NĚKDY PTAL na svolení a uživatel souhlasil (např. řekl 'ano'), PŘESKOČ KROK 4 a rovnou použij nástroj** (vrať `function_call`).\n"
+    "4. **Pokud jsi se ještě nikdy neptal (nebo pokud minule uživatel nesouhlasil):** Zeptej se uživatele na obecné svolení. (Např. 'Pro odpověď budu muset použít nástroje, jako je vyhledávání na webu nebo čtení dokumentů. Souhlasíš?')\n"
+    "5. Počkej na uživatelovo svolení ('ano' atd.).\n"
+    "6. Jakmile uživatel souhlasí, POUŽIJ NÁSTROJ a získej informace. (Toto svolení si pamatuj i pro všechny budoucí dotazy!)\n"
+    "7. Na základě získaných informací odpověz na původní otázku uživatele.\n\n"
+    "Máš zákaz psát jakékoliv ""**"" nebo markdownové formátování ve svých odpovědích. "
+)
+available_tools = { #mapování názvů funkcí na skutečné funkce
+    "prohledej_web_skoly": prohledej_web_skoly,
+    "ziskej_obsah_pdf_z_webu": ziskej_obsah_pdf_z_webu,
+    "nacti_skolni_rad": nacti_skolni_rad,
+}
+model = genai.GenerativeModel( 
+    'gemini-flash-latest', #výběr modelu Gemini Flash Latest - vhodný pro textové úkoly a zdarma
+    system_instruction=BOT_PROMPT, #nastavení systémové instrukce (promptu) pro model
+    tools=[prohledej_web_skoly, ziskej_obsah_pdf_z_webu, nacti_skolni_rad] #registrace dostupných nástrojů pro model
+)
+chat = model.start_chat(history=[], enable_automatic_function_calling=False) 
+#zahájení nové chatovací relace s prázdnou historií a vypnutým automatickým voláním funkcí
+
+#----FUNKCE----
+def send_message(): #odeslání zprávy uživatele a spuštění zpracování na pozadí
+    user_msg = user_input.get().strip() #získání textu z vstupního pole a odstranění přebytečných mezer
+    if not user_msg: #kontrola, zda uživatel nezadal prázdnou zprávu
+        return
+    timestamp = datetime.now().strftime("%H:%M") #získání aktuálního času pro časové razítko
+    
+    chat_box.configure(state='normal') #povolení úprav v chatovacím okně
+
+    chat_box.insert(ctk.END, f"[{timestamp}] Uživatel: {user_msg}\n\n", "user") # vloží uživatelskou zprávu do chatovacího okna s časovým razítkem a tagem "user"
+
+    chat_box.configure(state='disabled') #zakázání úprav v chatovacím okně
+    
+    chat_box.yview(ctk.END) #posunutí zobrazení na konec chatovacího okna
+
+    user_input.delete(0, ctk.END) #vymazání vstupního pole po odeslání zprávy
+    
+    threading.Thread(target=call_gemini, args=(user_msg, timestamp), daemon=True).start() #spuštění volání Gemini na pozadí v novém vlákně
+
+def call_gemini(user_msg, timestamp): #volání Gemini modelu a zpracování odpovědi
+    try:
+        dnesni_datum = datetime.now().strftime("%d. %m. %Y") #získání dnešního data 
+        final_user_msg = f"Kontext: Dnešní datum je {dnesni_datum}. Čas je {timestamp} Otázka uživatele: {user_msg}" #přidání kontextu data k uživatelské zprávě
+
+        # Pošli zprávu modelu poprvé
+        response = chat.send_message(final_user_msg) #odeslání zprávy modelu a získání počáteční odpovědi
+        
+        # Opakuj, dokud model požaduje volání funkcí
+        while response.parts and response.parts[0].function_call: #kontrola, zda odpověď obsahuje požadavek na volání funkce
+            function_call = response.parts[0].function_call #získání požadavku na volání funkce
+            function_name = function_call.name #získání názvu funkce
+            function_args = function_call.args #získání argumentů funkce
+ 
+            if function_name not in available_tools: #kontrola, zda je požadovaná funkce dostupná
+                bot_msg = f"Chyba: Model se pokusil zavolat neznámý nástroj: {function_name}"
+                chat_box.after(0, lambda: insert_ai_message(bot_msg, timestamp))
+                return 
+
+            function_to_call = available_tools[function_name] #získání skutečné funkce podle názvu
+            tool_output = function_to_call(**function_args) #volání funkce s argumenty a získání výstupu nástroje
+            
+            response = chat.send_message( #odeslání výstupu nástroje zpět modelu pro další zpracování
+                {
+                    "function_response": { 
+                        "name": function_name, 
+                        "response": {"content": tool_output}, 
+                    }
+                }
+            )
+
+        bot_msg = response.text #získání finální textové odpovědi modelu
+        chat_box.after(0, lambda: insert_ai_message(bot_msg, timestamp)) #vloží odpověď modelu do chatovacího okna s časovým razítkem
+
+    except Exception as e:
+        error_msg = f"Došlo k chybě: {str(e)}"
+        print(error_msg)
+        chat_box.after(0, lambda: insert_ai_message(error_msg, timestamp))
+
+def insert_ai_message(msg, timestamp): #vloží zprávu asistenta do chatovacího okna
+    chat_box.configure(state='normal') #povolení úprav v chatovacím okně
+    
+    prefix = f"[{timestamp}] Pomocník: " #připraví prefix s časovým razítkem pro asistenta
+    final_msg = msg.replace("**", "") # Odstranění všech výskytů "**" z odpovědi
+    
+
+    chat_box._textbox.insert(ctk.END, prefix, "ai") # Vložení prefixu s časovým razítkem a tagem "ai"
+    chat_box._textbox.insert(ctk.END, final_msg, "ai") # Vložení samotné zprávy asistenta s tagem "ai"
+    chat_box._textbox.insert(ctk.END, "\n", "ai") # Vložení nového řádku pro oddělení zpráv
+    
+    chat_box.configure(state='disabled') #zakázání úprav v chatovacím okně
+    chat_box.yview(ctk.END) #posunutí zobrazení na konec chatovacího okna
+
+#----NASTAVENÍ GUI (CUSTOMTKINTER)----
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+okno = ctk.CTk()
+okno.title("GJSB AI POMOCNIK")
+okno.geometry("700x500")
+okno.resizable(True, True)
+
+#----CHAT BOX (GUI)----
+chat_box = ctk.CTkTextbox(okno, state='disabled', wrap=ctk.WORD, #vytvoření textového pole pro chatovací okno
+                          font=("Segoe UI", 14), corner_radius=10) #nastavení fontu a zaoblení rohů
+chat_box.pack(padx=10, pady=10, fill=ctk.BOTH, expand=True) #umístění chatovacího okna s vyplněním prostoru a roztažením
+
+#----NAČTENÍ LOGA (GUI)----
+try:
+    img = Image.open("C:/Users/adame/Downloads/gjsb_logo.png")
+    logo = ImageTk.PhotoImage(img.resize((640, 150)))
+    
+    chat_box.configure(state='normal')
+    chat_box._textbox.image_create(ctk.END, image=logo, padx=5, pady=20) # Vložení loga do chatovacího okna
+    chat_box._textbox.insert(ctk.END, "\n")
+    chat_box._textbox.tag_configure("center", justify="center") # Definice tagu pro centrování
+    chat_box.image = logo
+    chat_box.configure(state='disabled')
+except Exception as e:
+    print(f"Logo se nepodařilo načíst: {e}")
+    chat_box.configure(state='normal')
+    chat_box._textbox.insert(ctk.END, f"CHYBA: Logo 'C:/Users/adame/Downloads/logo.png' se nepodařilo načíst.\n{e}\n\n", "ai")
+    chat_box.configure(state='disabled')
+
+
+# ---- TAGY PRO VZHLED ----
+chat_box._textbox.tag_config("user", 
+    foreground="#FFFFFF",               # Bílý text
+    background="#000000",               # Černé pozadí bubliny
+    font=("Segoe UI", 14),
+    lmargin1=15,                        # Odsazení textu zleva v bublině
+    lmargin2=15,
+    rmargin=70,                         # Mezera vpravo (bublina nebude až do kraje)
+    spacing1=5,                         # Mezera nad bublinou
+    spacing3=5,                         # Mezera pod bublinou
+    justify="left"
+)
+
+chat_box._textbox.tag_config("ai", 
+    foreground="#FFFFFF",             # Bílý text
+    font=("Segoe UI", 18, "bold"),
+    lmargin1=15,                        # Odsazení textu zleva v bublině
+    lmargin2=15,                        
+    rmargin=70,                         # Mezera vpravo (bublina nebude až do kraje)
+    spacing1=5,                         # Mezera nad bublinou
+    spacing3=5,                         # Mezera pod bublinou
+    justify="right"                      # Necháme zarovnání vlevo pro lepší čitelnost
+)
+
+#----VSTUPNÍ POLE A TLAČÍTKO (GUI)----
+
+ctk.CTkFrame(okno, height=2, fg_color="gray25").pack(fill=ctk.X, padx=10, pady=0) #oddělovač
+
+frame = ctk.CTkFrame(okno, fg_color="transparent") #rámec pro vstupní pole a tlačítko
+frame.pack(padx=10, pady=10, fill=ctk.X) #umístění rámce s vyplněním šířky okna
+
+user_input = ctk.CTkEntry(frame, font=("Segoe UI", 14), placeholder_text="Zeptejte se mě na cokoliv ohledně GJSB...") #vstupní pole pro uživatelskou zprávu
+user_input.pack(side=ctk.LEFT, fill=ctk.X, expand=True, padx=(0, 10)) #umístění vstupního pole s vyplněním šířky rámce
+user_input.bind("<Return>", lambda event: send_message()) #odeslání zprávy při stisku Enter
+
+send_btn = ctk.CTkButton(frame, text="Odeslat", font=("Segoe UI", 14, "bold"), command=send_message) #tlačítko pro odeslání zprávy
+send_btn.pack(side=ctk.LEFT) #umístění tlačítka vedle vstupního pole
+
+#----SMYČKA APLIKACE----
+okno.mainloop()
