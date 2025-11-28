@@ -219,7 +219,7 @@ chat_box.pack(padx=10, pady=10, fill=ctk.BOTH, expand=True) #umístění chatova
 
 #----NAČTENÍ LOGA (GUI)----
 try:
-    img = Image.open("C:/Users/adame/Downloads/gjsb_logo.png")
+    img = Image.open("adresa")
     logo = ImageTk.PhotoImage(img.resize((640, 150)))
     
     chat_box.configure(state='normal')
@@ -231,7 +231,7 @@ try:
 except Exception as e:
     print(f"Logo se nepodařilo načíst: {e}")
     chat_box.configure(state='normal')
-    chat_box._textbox.insert(ctk.END, f"CHYBA: Logo 'C:/Users/adame/Downloads/logo.png' se nepodařilo načíst.\n{e}\n\n", "ai")
+    chat_box._textbox.insert(ctk.END, f"CHYBA: Logo 'adresa' se nepodařilo načíst.\n{e}\n\n", "ai")
     chat_box.configure(state='disabled')
 
 
